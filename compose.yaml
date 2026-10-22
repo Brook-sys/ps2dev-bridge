@@ -1,0 +1,35 @@
+# Reference deployment for ps2dev-bridge.
+# Copy .env.example to .env, fill in the values, then `docker compose up -d`.
+
+services:
+  ps2dev-bridge:
+    image: ghcr.io/brook-sys/ps2dev-bridge:latest
+    # To build locally instead of pulling from GHCR:
+    # build: .
+    restart: always
+    environment:
+      PS2BRIDGE_API_KEY: ${PS2BRIDGE_API_KEY:?set PS2BRIDGE_API_KEY in .env}
+      PS2_HOST: ${PS2_HOST:?set PS2_HOST (PS2 console IP) in .env}
+      # Optional tuning (defaults shown):
+      # PS2BRIDGE_PORT: 17800
+      # PS2BRIDGE_BUILD_TIMEOUT: 900
+      # PS2BRIDGE_PUSH_TIMEOUT: 60
+      # PS2BRIDGE_LOG_SECONDS: 15
+    ports:
+      # Default: publish on all interfaces. Harden by binding to a single
+      # address reachable only from your trusted network, e.g. a VPN
+      # (tailscale) interface:
+      #   - "100.x.y.z:17800:17800"
+      - "17800:17800"
+    volumes:
+      # Project sources + build artifacts survive container recreation.
+      ps2dev-work:/work
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:17800/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  ps2dev-work:

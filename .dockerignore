@@ -1,0 +1,9 @@
+.git
+.github
+bridge/tests
+bridge/.venv
+**/__pycache__
+*.md
+.env
+compose.yaml
+skill
