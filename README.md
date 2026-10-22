@@ -141,9 +141,10 @@ python -m pytest bridge/tests -v
 ```
 
 CI (`.github/workflows/build.yml`) runs the same tests on every PR and push,
-then builds and publishes `ghcr.io/brook-sys/ps2dev-bridge` (tags `vX.Y.Z`,
-`vX.Y` and `latest` on the default branch). The base image tag is pinned in
-the `Dockerfile` — bump it deliberately.
+then builds and publishes `ghcr.io/brook-sys/ps2dev-bridge` with tags `X.Y.Z`,
+`X.Y` and `latest` (image tags drop the `v` prefix — standard Docker
+convention; git tags keep it). The base image tag is pinned in the `Dockerfile`
+— bump it deliberately.
 
 ## Credits
 
