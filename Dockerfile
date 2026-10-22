@@ -6,7 +6,9 @@
 # and re-run the workflow.
 FROM ghcr.io/ps2dev/ps2dev:v2.0.0
 
-RUN apk add --no-cache python3 py3-pip
+# `make` is absent from the official image's final stage (build-base exists
+# only in its builder stage), but ps2sdk sample builds require it.
+RUN apk add --no-cache make python3 py3-pip
 
 WORKDIR /app
 

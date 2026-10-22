@@ -25,7 +25,9 @@ services:
       # Project sources + build artifacts survive container recreation.
       ps2dev-work:/work
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:17800/health"]
+      # 127.0.0.1, not localhost: musl resolves localhost to ::1 first and
+      # the service binds IPv4 only, so an in-container wget gets refused.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:17800/health"]
       interval: 30s
       timeout: 5s
       retries: 3

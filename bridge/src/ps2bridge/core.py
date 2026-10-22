@@ -277,7 +277,14 @@ def status(cfg: Config) -> dict:
         "tools": {
             "make": shutil.which("make") is not None,
             "ps2client": shutil.which(cfg.ps2client_bin) is not None,
-            "ee-gcc": shutil.which("ee-gcc") is not None,
+            # The official ps2dev image ships the triplet-named cross-compiler
+            # (verified in-image: mips64r5900el-ps2-elf-gcc); keep the classic
+            # ee-gcc alias as a fallback for older toolchain layouts.
+            "ee-gcc": (
+                shutil.which("ee-gcc")
+                or shutil.which("mips64r5900el-ps2-elf-gcc")
+            )
+            is not None,
         },
         "artifacts": list_artifacts(cfg),
         "disk_free_bytes": free,
