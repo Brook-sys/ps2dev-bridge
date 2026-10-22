@@ -14,7 +14,7 @@ the console. The entire debug loop is 3–4 calls:
 2. sync sources      (tar upload — see below)
 3. ps2_build         (make; full log returns in the response)
 4. ps2_run           (push ELF + capture console output while it runs)
-   → read console_log, find the bug, edit code, go back to 2
+   → read log, find the bug, edit code, go back to 2
 ```
 
 ## Where the bridge lives
@@ -41,15 +41,32 @@ files/dirs are accepted — no symlinks, no absolute paths, no `..` traversal.
 Sync only what changed; the volume persists between builds (incremental
 `make` is fast).
 
+## How the console side works (read once — verified against ps2client src)
+
+- The console runs **ps2link** (TCP 18193 requests, UDP 18194 console). The
+  bridge probes 18193 before every console call, so a dead console fails in
+  ~3 s with `cannot reach ps2link` instead of a hang or a client crash.
+- `execee host:<path>` is a fire-and-forget command: **the console pulls the
+  ELF from the bridge** over the request channel and then runs it. Without
+  the `host:` prefix the console would look for the file on its own side —
+  the bridge always adds it; don't pass one yourself.
+- While the console pulls (and after it runs the program), the netconsole
+  stream — program stdout, ps2link messages, exception dumps — is printed
+  by the same ps2client process. `ps2_run`'s `log` is that stream.
+- **ps2link dies with every program it executes** (the ELF replaces it in EE
+  RAM). After each successful run, ask the user to reload ps2link on the
+  console before the next run. The TV is the ground truth: it shows
+  `executing file ...` and the program output.
+
 ## MCP tools
 
 | Tool | What it does |
 |---|---|
 | `ps2_status()` | Config, toolchain presence (`make`, `ps2client`, `ee-gcc`), artifacts, free disk. Call first. |
 | `ps2_build(clean?)` | `make` in the workspace; returns `exit_code` + full (head+tail truncated) log. |
-| `ps2_push(artifact?)` | `ps2client execee` — uploads and executes an ELF on the console. Default artifact: newest `.elf`. |
-| `ps2_log(seconds?)` | `ps2client listen` — captures output from the PS2 network console. |
-| `ps2_run(artifact?, seconds?)` | Push + listen while it runs. `push_log` + `console_log` in one response. The workhorse. |
+| `ps2_push(artifact?)` | `ps2client execee host:<path>` — console pulls the ELF and runs it. Default artifact: newest `.elf`. Blocks ≈ `PS2BRIDGE_PUSH_TIMEOUT` (60 s). |
+| `ps2_log(seconds?)` | `ps2client listen` — captures the netconsole stream for an idle window (default 15 s). |
+| `ps2_run(artifact?, seconds?)` | Probe → netdump → push+capture in one sequential flow; `log` = netconsole stream. The workhorse. |
 
 ## REST API (mirror of the tools)
 
@@ -69,17 +86,31 @@ Sync only what changed; the volume persists between builds (incremental
 - Build failed → the full compiler output is in `log`; fix the code, re-sync, rebuild.
 - `ok: false` with `PS2_HOST is not configured` → the bridge has no console IP;
   that's a deployment problem (env `PS2_HOST`), not a code problem.
-- `ps2_run` returned but `console_log` is empty → either the program printed
-  nothing, or the console's ps2link did not echo to the network console.
-  Try `ps2_log` again with more seconds; if still empty, ask the user to
-  check the console is on and ps2link is running.
-- Push timed out (exit_code 124) → console off/unreachable, or ps2link hung.
-  One console only: console ops are serialized; don't fire them in parallel.
+- `ok: false` with `cannot reach ps2link` → the pre-flight probe failed: the
+  console is off, or ps2link isn't loaded (maybe because the previous run's
+  program replaced it). Ask the user to check the console and reload ps2link.
+- `ps2_run` ok=true but `log` is empty → either the program printed nothing
+  in the window, or it never ran (the TV screen says which — `executing file`
+  + program output means it ran). Retry with more seconds if the program may
+  print later; if the TV shows `could not execute`, the ELF itself was
+  rejected by the loader — inspect it (`GET /artifacts/{path}` + readelf).
+- exit_code 124 (timeout) → the pull window ran out; the shipped ps2client
+  predates the upstream TCP_NODELAY fix, so big ELFs can pull slowly. Retry
+  with a larger `seconds`.
+- Push/run ok=true is weak evidence by itself — ps2client exits 0 as long as
+  the command was sent. Treat `log` content and the TV as the truth.
 - `GET /artifacts/{path}` is how you bring an ELF back to the agent machine.
 
 ## Cautions
 
-- One build at a time and one console op at a time (the bridge enforces a lock).
+- One build at a time and one console op at a time (the bridge enforces a
+  lock). Never run a second ps2client by hand while a bridge console op is
+  in flight — the protocol has a single netconsole port and the second
+  client crashes.
+- **After each executed program, ps2link is gone** — the user must reload it
+  before the next run. Plan your loop: one run, then ask for a reload.
+- `ps2_push`/`ps2_run` block for the whole idle window even on success —
+  that's how the pull/capture protocol works, not a hang.
 - Long builds are capped by `PS2BRIDGE_BUILD_TIMEOUT` (default 900 s).
 - If the host running the bridge reboots, in-flight operations die — re-run.
 - Logs longer than `PS2BRIDGE_MAX_LOG` chars are head+tail truncated with a

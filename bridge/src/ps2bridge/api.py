@@ -101,10 +101,14 @@ def create_app(cfg: Config) -> Starlette:
 
     @mcp.tool
     def ps2_push(artifact: str | None = None) -> dict:
-        """Send an ELF to the PS2 console (ps2client execee via ps2link).
+        """Send an ELF to the PS2 console: `ps2client execee host:<path>` via ps2link.
 
-        artifact is a workspace-relative path; when omitted, the newest .elf
-        found in the workspace is used.
+        The console PULLS the file from the bridge during ps2client's idle
+        window, so the call blocks roughly push_timeout seconds. artifact is
+        a workspace-relative path; when omitted, the newest .elf is used.
+        ok=true only means the command was sent and the window served — the
+        console screen or a follow-up ps2_run log is the real execution
+        evidence. A probe fails fast (ok=false) when ps2link is unreachable.
         """
         return core.push(cfg, artifact)
 
@@ -112,17 +116,22 @@ def create_app(cfg: Config) -> Starlette:
     def ps2_log(seconds: int | None = None) -> dict:
         """Capture output from the PS2 network console (ps2client listen).
 
-        seconds is the idle window to wait for console output (default 15).
+        seconds is the idle window to wait for console output (default 15) —
+        activity extends it. Fails fast when ps2link is unreachable.
         """
         return core.console_log(cfg, seconds)
 
     @mcp.tool
     def ps2_run(artifact: str | None = None, seconds: int | None = None) -> dict:
-        """Push an ELF to the PS2 and capture console output while it runs.
+        """Push an ELF to the PS2 and capture the netconsole output while it runs.
 
-        The debug-loop workhorse: push_log shows the upload/exec result,
-        console_log shows what the program printed on the console (including
-        ps2link exception dumps when netdump is honored by the console).
+        The debug-loop workhorse. One sequential ps2client flow: probe
+        ps2link → netdump (echo stdout/exceptions) → execee host:<path>,
+        where the same process serves the console's file pull AND prints the
+        netconsole stream. `log` holds that stream (program output, ps2link
+        messages, exception dumps). seconds is the idle capture window
+        (default 15); the response takes ≈ pull + runtime + seconds. The
+        executed program replaces ps2link — reload it before the next run.
         """
         return core.run_on_console(cfg, artifact, seconds)
 

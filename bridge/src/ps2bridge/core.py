@@ -6,18 +6,30 @@ Design notes (honest ones):
   and the bridge must never block forever on it.
 - Builds and console operations are serialized by a lock: the toolchain is
   CPU-bound and there is exactly one console.
-- `run_on_console` mirrors the classic two-terminal ps2link workflow:
-  start `ps2client listen` FIRST, then `execee` the ELF, then collect.
+- ps2link protocol (verified against the ps2client sources, 2026-10):
+  `execee` is a fire-and-forget UDP command. The console PULLS the ELF from
+  this host through the TCP request channel — hence the `host:` path prefix
+  (without it the console looks for a file on ITS side and fails with
+  "could not execute"). While the console pulls, the program's stdout and
+  ps2link's messages stream back to the SAME ps2client process on its UDP
+  console socket during the idle-timeout window (-t; activity extends it).
+  The protocol has a single netconsole UDP port, so two ps2clients at once
+  are illegal (the second crashes the client) — all console steps are
+  strictly sequential: probe → netdump → execee/listen.
+- ps2client quirks we defend against (all observed on real hardware):
+  SIGSEGV when a connection is refused, silent rc=0 give-ups, and TCP
+  connects that block forever against a console with no ps2link. A short
+  pre-flight TCP probe turns all of those into honest, fast errors.
 """
 
 from __future__ import annotations
 
 import shutil
+import socket
 import subprocess
 import tarfile
 import tempfile
 import threading
-import time
 from pathlib import Path
 
 from . import VERSION
@@ -170,34 +182,80 @@ def _ps2client(cfg: Config, args: list[str], timeout: int) -> tuple[int, str]:
     if timeout:
         cmd += ["-t", str(timeout)]
     # Hard cap a bit above ps2client's own idle timeout (-t) so IT exits first.
-    return _run(cmd + args, timeout=timeout + 5)
+    # ps2client resolves `host:` paths relative to its own working directory
+    # (its fix_pathname strips the leading slash), so pin cwd to "/" — that
+    # makes `host:/work/foo.elf` always mean the real workspace file.
+    return _run(cmd + args, timeout=timeout + 5, cwd="/")
+
+
+def _probe_ps2link(cfg: Config) -> tuple[bool, str]:
+    """Pre-flight TCP probe of ps2link's request port (3 s, no ps2client).
+
+    Why this exists (observed on real hardware): ps2client SIGSEGVs when the
+    connection is refused, and blocks indefinitely on a console whose network
+    stack answers ping but has no ps2link listening. The probe turns both
+    situations into an honest, actionable error before ps2client is spawned.
+    """
+    if not cfg.ps2_host:
+        return False, "PS2_HOST is not configured on the bridge"
+    try:
+        with socket.create_connection((cfg.ps2_host, cfg.ps2link_port), timeout=3):
+            return True, ""
+    except OSError as e:
+        return False, (
+            f"cannot reach ps2link at {cfg.ps2_host}:{cfg.ps2link_port} ({e}) — "
+            "is the console on and ps2link loaded? (ps2link is replaced by each "
+            "program it executes; reload it on the console before the next run)"
+        )
 
 
 def push(cfg: Config, artifact: str | None = None) -> dict:
-    """Send an ELF to the PS2 with `ps2client execee` (upload + execute)."""
+    """Send an ELF to the PS2: `ps2client execee host:<path>`.
+
+    The console PULLS the file from this host through the TCP request channel
+    during ps2client's idle window — so this call blocks for roughly
+    push_timeout seconds even when everything works. ps2client's rc=0 only
+    means the command was sent and the window served: the console screen (or
+    a follow-up ps2_run/ps2_log) is the real evidence of execution.
+    """
     if not cfg.ps2_host:
         return {"ok": False, "error": "PS2_HOST is not configured on the bridge"}
+    probe_ok, probe_err = _probe_ps2link(cfg)
+    if not probe_ok:
+        return {"ok": False, "error": probe_err}
     try:
         artifact_path = resolve_artifact(cfg, artifact)
     except ValueError as e:
         return {"ok": False, "error": str(e)}
     with _op_lock:
-        # Best effort: ask ps2link to dump exceptions to the network console
-        # so crashes show up in `listen` output.
+        # Best effort: ask ps2link to echo stdout/exceptions to the network
+        # console so execution problems show up in the window / ps2_log.
         _ps2client(cfg, ["netdump"], timeout=15)
-        rc, out = _ps2client(cfg, ["execee", str(artifact_path)], timeout=cfg.push_timeout)
+        rc, out = _ps2client(cfg, ["execee", f"host:{artifact_path}"], timeout=cfg.push_timeout)
     return {
         "ok": rc == 0,
         "exit_code": rc,
         "artifact": str(artifact_path.relative_to(Path(cfg.workspace))),
         "log": truncate(out, cfg.max_log_chars),
+        "note": (
+            "ps2link executes the ELF in place — the program replaces ps2link "
+            "on the console. Reload ps2link before the next push/run."
+        ),
     }
 
 
 def console_log(cfg: Config, seconds: int | None = None) -> dict:
-    """Capture `seconds` of output from the PS2 network console (`ps2client listen`)."""
+    """Capture `seconds` of output from the PS2 network console (`ps2client listen`).
+
+    listen is idle-based: it returns after `seconds` without traffic (activity
+    resets the counter). It binds the single netconsole port, so it must be
+    the only ps2client running — the operation lock takes care of that.
+    """
     if not cfg.ps2_host:
         return {"ok": False, "error": "PS2_HOST is not configured on the bridge"}
+    probe_ok, probe_err = _probe_ps2link(cfg)
+    if not probe_ok:
+        return {"ok": False, "error": probe_err}
     secs = seconds if seconds and seconds > 0 else cfg.log_seconds
     with _op_lock:
         rc, out = _ps2client(cfg, ["listen"], timeout=secs)
@@ -213,48 +271,46 @@ def run_on_console(
     artifact: str | None = None,
     seconds: int | None = None,
 ) -> dict:
-    """Push an ELF and capture the console output while it runs.
+    """Push an ELF to the PS2 and capture the console output while it runs.
 
-    Mirrors the classic ps2link two-terminal workflow: start `listen` first
-    (so nothing printed right after exec is missed), then `netdump` (best
-    effort), then `execee`, then wait out the capture window.
+    One ps2client process does the whole job, strictly sequential (the
+    protocol has a single netconsole UDP port — a concurrent listener makes
+    the second ps2client crash, so the old listener+execee design is gone):
+      1. probe ps2link (honest fast failure when the console is unreachable);
+      2. netdump (best effort; exits immediately) so stdout/exceptions are
+         echoed to the network console;
+      3. `execee host:<path> -t <window>` — the console pulls the ELF through
+         this process's TCP channel and the netconsole stream (program
+         output, ps2link messages, exception dumps) is printed by the SAME
+         process until the window goes idle.
+    `seconds` is the idle capture window (default 15): activity extends it,
+    so it never truncates a pull that is still making progress. The response
+    takes ≈ pull time + runtime + seconds of idle tail.
     """
     if not cfg.ps2_host:
         return {"ok": False, "error": "PS2_HOST is not configured on the bridge"}
+    probe_ok, probe_err = _probe_ps2link(cfg)
+    if not probe_ok:
+        return {"ok": False, "error": probe_err}
     try:
         artifact_path = resolve_artifact(cfg, artifact)
     except ValueError as e:
         return {"ok": False, "error": str(e)}
     secs = seconds if seconds and seconds > 0 else cfg.log_seconds
+    window = max(secs, 10)  # keep the file-pull phase comfortably inside -t
     with _op_lock:
-        with tempfile.TemporaryFile(mode="w+b") as listener_out:
-            listener = subprocess.Popen(
-                [cfg.ps2client_bin, "-h", cfg.ps2_host, "-t", str(secs), "listen"],
-                stdin=subprocess.DEVNULL,
-                stdout=listener_out,
-                stderr=subprocess.STDOUT,
-            )
-            try:
-                _ps2client(cfg, ["netdump"], timeout=15)
-                rc, out = _ps2client(cfg, ["execee", str(artifact_path)], timeout=cfg.push_timeout)
-                time.sleep(secs)
-            finally:
-                try:
-                    listener.terminate()
-                except ProcessLookupError:
-                    pass
-                try:
-                    listener.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    listener.kill()
-                listener_out.seek(0)
-                console = listener_out.read().decode(errors="replace")
+        _ps2client(cfg, ["netdump"], timeout=15)
+        rc, out = _ps2client(cfg, ["execee", f"host:{artifact_path}"], timeout=window)
     return {
         "ok": rc == 0,
         "exit_code": rc,
         "artifact": str(artifact_path.relative_to(Path(cfg.workspace))),
-        "push_log": truncate(out, cfg.max_log_chars),
-        "console_log": truncate(console, cfg.max_log_chars),
+        "log": truncate(out, cfg.max_log_chars),
+        "note": (
+            "log holds the netconsole stream for the window. ps2link is "
+            "replaced by the executed program — reload it on the console "
+            "before the next run."
+        ),
     }
 
 
@@ -273,6 +329,7 @@ def status(cfg: Config) -> dict:
         "version": VERSION,
         "workspace": str(workspace),
         "ps2_host": cfg.ps2_host,
+        "ps2link_port": cfg.ps2link_port,
         "api_key_configured": bool(cfg.api_key),
         "tools": {
             "make": shutil.which("make") is not None,

@@ -12,6 +12,7 @@ services:
       PS2_HOST: ${PS2_HOST:?set PS2_HOST (PS2 console IP) in .env}
       # Optional tuning (defaults shown):
       # PS2BRIDGE_PORT: 17800
+      # PS2BRIDGE_PS2LINK_PORT: 18193
       # PS2BRIDGE_BUILD_TIMEOUT: 900
       # PS2BRIDGE_PUSH_TIMEOUT: 60
       # PS2BRIDGE_LOG_SECONDS: 15

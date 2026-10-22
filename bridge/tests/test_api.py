@@ -24,6 +24,7 @@ def cfg(tmp_path):
         port=17800,
         workspace=str(tmp_path / "work"),
         ps2_host=None,
+        ps2link_port=18193,
         ps2client_bin="ps2client-not-present-in-tests",
         build_timeout=60,
         push_timeout=10,

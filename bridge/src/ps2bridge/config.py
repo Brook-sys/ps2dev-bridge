@@ -13,6 +13,7 @@ class Config:
     port: int
     workspace: str
     ps2_host: str | None
+    ps2link_port: int
     ps2client_bin: str
     build_timeout: int
     push_timeout: int
@@ -30,6 +31,10 @@ class Config:
             workspace=env.get("PS2BRIDGE_WORKSPACE", "/work"),
             # ps2client itself also honors PS2HOSTNAME; keep both entry points.
             ps2_host=env.get("PS2_HOST") or env.get("PS2HOSTNAME") or None,
+            # ps2link's TCP request port (0x4711), verified against the
+            # ps2client sources. Used by the pre-flight probe only — ps2client
+            # keeps using its own compiled-in defaults.
+            ps2link_port=int(env.get("PS2BRIDGE_PS2LINK_PORT", "18193")),
             ps2client_bin=env.get("PS2CLIENT_BIN", "ps2client"),
             build_timeout=int(env.get("PS2BRIDGE_BUILD_TIMEOUT", "900")),
             push_timeout=int(env.get("PS2BRIDGE_PUSH_TIMEOUT", "60")),

@@ -43,9 +43,9 @@ MCP (registered server or direct streamable HTTP at `/mcp`):
 |---|---|
 | `ps2_status()` | Config, toolchain presence, artifacts, free disk |
 | `ps2_build(clean?)` | `make` in the workspace, full log in the response |
-| `ps2_push(artifact?)` | `ps2client execee` — upload + execute an ELF on the console |
+| `ps2_push(artifact?)` | `ps2client execee host:<path>` — the console pulls the ELF from the bridge and runs it |
 | `ps2_log(seconds?)` | `ps2client listen` — capture the PS2 network console |
-| `ps2_run(artifact?, seconds?)` | Push + listen while it runs (push_log + console_log) |
+| `ps2_run(artifact?, seconds?)` | Probe → netdump → push + netconsole capture in one sequential flow |
 
 REST mirror (same operations, for scripts/CI):
 
@@ -95,10 +95,21 @@ An OpenCode-ready skill lives in [`skill/ps2dev-bridge/`](skill/ps2dev-bridge/SK
 ## Console requirements
 
 - A PS2 on the same LAN as the bridge host, running **ps2link** (e.g. loaded
-  via FreeMcBoot), reachable by IP. `ps2client`'s default port conventions
-  apply; the console IP is configured once via `PS2_HOST`.
-- `ps2_push`/`ps2_run` call `netdump` (best effort) so ps2link exceptions are
-  echoed to the network console and show up in `console_log`.
+  via FreeMcBoot), reachable by IP. The console IP is configured once via
+  `PS2_HOST`; ps2link's request port (TCP 18193 by default) can be overridden
+  with `PS2BRIDGE_PS2LINK_PORT`.
+- Protocol (verified against the ps2client sources and real hardware):
+  `execee host:<path>` is fire-and-forget — **the console pulls the ELF from
+  the bridge** over the request channel, and the netconsole stream (program
+  stdout, ps2link messages, exception dumps) flows back to the same
+  ps2client process. The bridge pre-probes the console so a missing ps2link
+  fails fast with an honest error.
+- `ps2_push`/`ps2_run` send `netdump` (best effort) so ps2link echoes
+  stdout/exceptions to the network console.
+- **ps2link is replaced by every program it executes** — reload ps2link on
+  the console between runs. One console op at a time; the netconsole is a
+  single UDP port, so concurrent ps2client invocations are illegal (the
+  bridge serializes its own, and nothing else should run one meanwhile).
 
 ## Security model (read this before exposing the port)
 
@@ -120,13 +131,19 @@ An OpenCode-ready skill lives in [`skill/ps2dev-bridge/`](skill/ps2dev-bridge/SK
 
 ## Limitations (honest ones)
 
-- **Unvalidated against real hardware so far**: unit tests cover the service
-  (auth, sync, REST, MCP handshake), but the `ps2client` push/listen
-  semantics (`netdump` echo, log completeness, idle-timeout behavior) get
-  validated on the first console session. Expect small adjustments.
+- Protocol behavior (ps2link ports 18193/18194, `host:` pull, single
+  netconsole, idle-window timeouts, ps2link dying after each exec) was
+  verified against the ps2client sources and a real console in Oct/2026.
+  The 0.1.2 sequential flow gets its first full end-to-end pass on the next
+  console session — expect minor tuning.
+- The ps2client binary shipped in the base image predates the upstream
+  `TCP_NODELAY` fix, so the console's file pull can be slow; and ps2client
+  itself SIGSEGVs on refused connections / concurrent instances. The bridge
+  mitigates both (pre-flight probe + strictly sequential ops) but cannot fix
+  the client; replacing it with a fresh build is a deliberate future option.
 - One console, one build at a time (enforced by a lock; a second call waits).
-- `ps2_run` always waits out the full capture window (`seconds`, default 15)
-  before responding — there is no "exit early on program end" detection yet.
+- `ps2_push`/`ps2_run` block for the whole idle window even on success —
+  that's how the pull/capture protocol works.
 - ELF/ps2link flow only; ISO→OPL deployment is out of scope for now.
 - `linux/amd64` only (that's what the toolchain hosts run).
 - Over-long logs are head+tail truncated (~40 KB default) — the ends, where
