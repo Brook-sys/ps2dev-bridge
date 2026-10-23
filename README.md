@@ -152,6 +152,16 @@ An OpenCode-ready skill lives in [`skill/ps2dev-bridge/`](skill/ps2dev-bridge/SK
   the reset point, `ps2link_alive` comes back `false`, and recovery is a
   manual ps2link reload. Run such programs only when a hand reload
   afterwards is acceptable.
+- **Crash debugging (measured):** ps2link's exception handler prints the
+  failing exception, Cause/BadVAddr/Status/EPC and all 32 registers to the
+  netconsole. `ps2_run` parses that into a structured `crash` field and —
+  when the ELF carries debug info — symbolizes EPC/RA to `file:line` with
+  the toolchain's addr2line (`ps2_symbolize` for arbitrary addresses). After
+  a crash the exec slot stays occupied until `ps2_reset`. Not covered by
+  crash dumps: silent corruption (no MMU), integer div-by-zero, `break`
+  (the handler skips breakpoint exceptions), timing bugs — those belong to
+  PCSX2. `dumpmem`/`dumpreg` don't work with the shipped ps2client (the
+  console's `host:` file server refuses open-for-write).
 - One console op at a time; the netconsole is a single UDP port, so concurrent
   ps2client invocations are illegal (the bridge serializes its own, and
   nothing else should run one meanwhile).

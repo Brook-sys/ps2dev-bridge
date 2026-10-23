@@ -6,6 +6,7 @@ Layout of the service:
     │ Starlette (one port)                           │
     │  ├── REST routes: /health /sync /build         │
     │  │   /artifacts /push /log /run /reset         │
+    │  │   /symbolize                                 │
     │  └── Mount("/") → FastMCP http_app  → POST /mcp│
     │  middleware: X-API-Key on everything but /health│
     └────────────────────────────────────────────────┘
@@ -136,8 +137,28 @@ def create_app(cfg: Config) -> Starlette:
         response is true — then call ps2_reset to reboot the console back
         into a fresh ps2link. If the program exits, the console resets to
         its browser and ps2link must be reloaded by hand.
+        If the program CRASHES, ps2link's exception handler dumps the
+        registers into the log and the response carries a structured
+        `crash` object (cpu, type, cause, badvaddr, status, epc, ra, sp —
+        and `symbols` with function + file:line for EPC/RA when the ELF
+        was built with debug info). After a crash ps2link is alive but the
+        exec slot stays occupied: ps2_reset is required before the next run.
         """
         return core.run_on_console(cfg, artifact, seconds)
+
+    @mcp.tool
+    def ps2_symbolize(artifact: str | None = None, addrs: list[str] | None = None) -> dict:
+        """Map raw console addresses to source lines with the toolchain's addr2line.
+
+        Pass one or more 0x-prefixed hex addresses (EPC and ra from a crash
+        dump, or any address from a map) and get function + file:line for
+        each. artifact defaults to the newest .elf in the workspace; it must
+        have been built with debug info (-gdwarf-2) for lines to resolve —
+        '??' means no debug info at that address. ps2_run already calls this
+        automatically for a detected crash's EPC/RA; use it for any other
+        address you want to pin down.
+        """
+        return core.symbolize(cfg, artifact, addrs)
 
     @mcp.tool
     def ps2_reset() -> dict:
@@ -208,6 +229,11 @@ def create_app(cfg: Config) -> Starlette:
     def reset_ep(request: Request):
         return JSONResponse(core.reset_console(cfg))
 
+    def symbolize_ep(request: Request):
+        artifact = request.query_params.get("artifact") or None
+        addrs = request.query_params.getlist("addr")
+        return JSONResponse(core.symbolize(cfg, artifact, addrs))
+
     # ------------------------------------------------------------ assembly
 
     mcp_app = mcp.http_app(path="/mcp")
@@ -222,6 +248,7 @@ def create_app(cfg: Config) -> Starlette:
         Route("/log", log_ep, methods=["POST"]),
         Route("/run", run_ep, methods=["POST"]),
         Route("/reset", reset_ep, methods=["POST"]),
+        Route("/symbolize", symbolize_ep, methods=["POST"]),
         # Catch-all: everything else belongs to the MCP streamable-HTTP app
         # (endpoint: POST /mcp). Must come last.
         Mount("/", app=mcp_app),

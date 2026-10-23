@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ps2dev-bridge"
-version = "0.1.4"
+version = "0.2.0"
 description = "MCP + REST debug bridge for PlayStation 2 homebrew development, built on the official ps2dev container"
 requires-python = ">=3.10"
 dependencies = [

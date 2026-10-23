@@ -32,6 +32,7 @@ Design notes (honest ones):
 
 from __future__ import annotations
 
+import re
 import shutil
 import socket
 import subprocess
@@ -179,6 +180,128 @@ def resolve_artifact(cfg: Config, name: str | None) -> Path:
     if not candidates:
         raise ValueError("no .elf artifact in workspace — build first, or pass an explicit path")
     return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+# ---------------------------------------------------- crash parsing + symbolize
+
+# ps2link's exception handler (ee/excepHandler.c) prints to the netconsole:
+#   "           EE Exception handler: TLB store exception"
+#   "      Cause 7000800C  BadVAddr 00000000  Status 70030C13  EPC 0011DA4C"
+# followed by the 32 registers (each 128-bit EE register printed as two
+# 64-bit halves — the low 32 bits are the MIPS state that matters). The IOP
+# handler prints the same header/fields shape with its own 32-bit register
+# block. Layout captured from real hardware (2026-10-23, crash.elf).
+_CRASH_HEADER_RE = re.compile(r"(EE|IOP) Exception handler: (\w[^\n]*?) exception")
+_CRASH_FIELDS_RE = re.compile(
+    r"Cause ([0-9A-Fa-f]{8})\s+BadVAddr ([0-9A-Fa-f]{8})\s+"
+    r"Status ([0-9A-Fa-f]{8})\s+EPC ([0-9A-Fa-f]{8})"
+)
+_ADDR_RE = re.compile(r"^0x[0-9A-Fa-f]{1,8}$")
+
+
+def parse_crash(log: str) -> dict | None:
+    """Extract ps2link's exception dump from a captured console log.
+
+    Returns None when no exception is present. When one is, returns a dict
+    with cpu ("EE"/"IOP"), type, cause/badvaddr/status/epc and — when the
+    register block is present — ra and sp, all as 0x-prefixed hex exactly as
+    printed (e.g. "0x0011DA4C", "0x00000000").
+    """
+    m = _CRASH_HEADER_RE.search(log)
+    if not m:
+        return None
+    crash: dict = {"cpu": m.group(1), "type": m.group(2).strip()}
+    f = _CRASH_FIELDS_RE.search(log)
+    if f:
+        crash.update(
+            cause="0x" + f.group(1),
+            badvaddr="0x" + f.group(2),
+            status="0x" + f.group(3),
+            epc="0x" + f.group(4),
+        )
+    for reg in ("ra", "sp"):
+        # EE block: 32 hex chars per reg (24 + 8 low bits); IOP block: 8.
+        r = re.search(rf"\b{reg}: (?:[0-9A-F]{{24}})?([0-9A-F]{{8}})", log)
+        if r:
+            crash[reg] = "0x" + r.group(1)
+    return crash
+
+
+def _crash_note(crash: dict) -> str:
+    """Note for a crashed run: what happened, and what the agent must do next."""
+    loc = ""
+    for s in crash.get("symbols", []):
+        if s.get("addr") == crash.get("epc") and s.get("location") not in ("??", "?"):
+            loc = f" EPC {s['addr']} maps to {s['location']} ({s['function']})."
+            break
+    return (
+        f"the program CRASHED ({crash.get('cpu', '?')} exception: "
+        f"{crash.get('type', 'unknown')}).{loc} ps2link's exception handler "
+        "dumped the registers into the log, terminated the program thread "
+        "and stayed alive — but the exec slot stays occupied, so call "
+        "ps2_reset before the next run (a second ps2_run is silently "
+        "refused)."
+    )
+
+
+def symbolize(cfg: Config, artifact: str | None, addrs: list[str] | None) -> dict:
+    """Map raw 0x-hex EE addresses to function + file:line with addr2line.
+
+    Works on artifacts built with debug info (ps2dev builds usually carry
+    -gdwarf-2) and needs the toolchain's mips64r5900el-ps2-elf-addr2line,
+    which ships in the official ps2dev image. '??' locations mean the
+    address had no debug info (stripped build, or code inside ps2link/IRXs).
+    """
+    if not addrs:
+        return {
+            "ok": False,
+            "error": "no addr given — pass one or more 0x-prefixed hex addresses (e.g. 0x11da4c) from a crash dump or a map",
+        }
+    cleaned: list[str] = []
+    for a in addrs:
+        v = (a or "").strip()
+        if not _ADDR_RE.match(v):
+            return {
+                "ok": False,
+                "error": f"invalid address {a!r} — expected 0x-prefixed hex, 32-bit (e.g. 0x11da4c)",
+            }
+        cleaned.append(v)
+    try:
+        path = resolve_artifact(cfg, artifact)
+    except ValueError as e:
+        return {"ok": False, "error": str(e)}
+    addr2line = shutil.which(cfg.addr2line_bin)
+    if not addr2line:
+        return {
+            "ok": False,
+            "error": (
+                f"addr2line not found in PATH ({cfg.addr2line_bin}) — "
+                "symbolizing needs the ps2dev toolchain image"
+            ),
+        }
+    rc, out = _run([addr2line, "-f", "-C", "-e", str(path), *cleaned], timeout=60)
+    if rc != 0:
+        return {
+            "ok": False,
+            "error": f"addr2line failed (exit {rc})",
+            "log": truncate(out, cfg.max_log_chars),
+        }
+    lines = [line for line in out.splitlines() if line.strip()]
+    symbols = []
+    for i, addr in enumerate(cleaned):
+        # addr2line prints one function line + one location line per address.
+        symbols.append(
+            {
+                "addr": addr,
+                "function": lines[2 * i] if 2 * i < len(lines) else "??",
+                "location": lines[2 * i + 1] if 2 * i + 1 < len(lines) else "??",
+            }
+        )
+    return {
+        "ok": True,
+        "artifact": str(path.relative_to(Path(cfg.workspace))),
+        "symbols": symbols,
+    }
 
 
 # ---------------------------------------------------------------- console (ps2client)
@@ -332,7 +455,28 @@ def run_on_console(
         rc, out = _ps2client(cfg, ["execee", f"host:{artifact_path}"], timeout=window)
     # Post-run probe: which console state did the program leave behind?
     alive, _ = _probe_ps2link(cfg)
-    if alive:
+    # ps2link's exception handler prints a full dump to the netconsole when
+    # the program dies — parse it so agents get a structured crash object
+    # instead of eyeballing a wall of registers.
+    crash = parse_crash(out)
+    if crash:
+        # Best effort, never fatal: map EPC/RA back to source lines with the
+        # same ELF that just ran (needs -gdwarf-2 in the build; the bridge's
+        # own demo builds carry it).
+        try:
+            rel = str(artifact_path.relative_to(Path(cfg.workspace)))
+            sym = symbolize(cfg, rel, [crash.get(k) for k in ("epc", "ra") if crash.get(k)])
+            if sym.get("ok"):
+                crash["symbols"] = sym["symbols"]
+        except Exception:
+            pass  # symbolization is a bonus, not a contract
+        note = _crash_note(crash)
+        if not alive:
+            note += (
+                " ps2link did not answer the post-crash probe — it may need "
+                "a manual reload on the console."
+            )
+    elif alive:
         note = (
             "the program is still resident on the console (it parked or is "
             "long-running) — ps2link stayed alive underneath. Call ps2_reset "
@@ -346,7 +490,7 @@ def run_on_console(
             "ps2link is gone and must be reloaded on the console (or make "
             "the program park and use ps2_reset instead)."
         )
-    return {
+    response = {
         "ok": rc == 0,
         "exit_code": rc,
         "artifact": str(artifact_path.relative_to(Path(cfg.workspace))),
@@ -354,6 +498,9 @@ def run_on_console(
         "ps2link_alive": alive,
         "note": note,
     }
+    if crash:
+        response["crash"] = crash
+    return response
 
 
 # ---------------------------------------------------------------- reset

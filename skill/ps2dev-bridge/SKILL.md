@@ -141,6 +141,37 @@ All numbers below were measured on a real console through this bridge
   with `cannot reach ps2link`. Recovery is a **manual ps2link reload** —
   run such programs only when a hand reload afterwards is acceptable.
 
+## Crash debugging (measured on hardware)
+
+When a program dies from an exception, ps2link's handler (ee/excepHandler.c)
+prints a full dump to the netconsole — the `log` you get back — and
+terminates the program thread. ps2link itself survives.
+
+- **The bridge parses it for you:** `ps2_run` responses carry a `crash`
+  object — cpu (`EE`/`IOP`), type, cause, badvaddr, status, epc, and ra/sp
+  from the register block. When the ELF was built with debug info
+  (`-gdwarf-2`), `crash.symbols` maps EPC and ra to `function` +
+  `file:line`, and the note names the crash site. Real example (2026-10-23):
+  type `"TLB store"`, `"epc": "0x0011DA4C"` → `crash.c:21 (level3)`.
+- **Post-crash rule (measured):** the exec slot stays occupied — a second
+  `ps2_run` is silently refused until `ps2_reset`. The crash note says so.
+- **Coverage:** 12 of the 14 EE exceptions are hooked (TLB refill/mod/load/
+  store, address load/store, bus errors, reserved instruction, coprocessor
+  unusable, arithmetic overflow, trap). Deliberately NOT hooked: syscall (8)
+  and **breakpoint (9) — a `break` instruction is NOT caught**. IOP
+  exceptions print module name + relative EPC and parse the same way.
+- **Not debuggable via crash dumps:** silent corruption (stack overflow past
+  the linkfile region, wild writes into valid RAM — no MMU, no guard pages),
+  integer division by zero (MIPS doesn't trap it), timing-dependent bugs
+  (printf changes timing). For those: PCSX2.
+- **Known dead end (measured):** `ps2client dumpmem`/`dumpreg` exist in the
+  CLI, but the console-side `host:` file server refuses open-for-write
+  (`open fd = -1`) and the command hangs — they never produce a dump. Don't
+  burn time on them; the crash dump already carries the register state.
+- Symbolize any other address (map, jump table, whatever) with
+  `ps2_symbolize` — same addr2line the bridge uses; `??` means no debug info
+  at that address.
+
 ## MCP tools
 
 | Tool | What it does |
@@ -149,7 +180,8 @@ All numbers below were measured on a real console through this bridge
 | `ps2_build(clean?)` | `make` in the workspace; returns `exit_code` + full (head+tail truncated) log. |
 | `ps2_push(artifact?)` | `ps2client execee host:<path>` — console pulls the ELF and runs it. Default artifact: newest `.elf`. Blocks ≈ `PS2BRIDGE_PUSH_TIMEOUT` (60 s). |
 | `ps2_log(seconds?)` | `ps2client listen` — captures the netconsole stream for an idle window (default 15 s). |
-| `ps2_run(artifact?, seconds?)` | Probe → netdump → push+capture in one sequential flow; `log` = netconsole stream, `ps2link_alive` = console state afterwards. The workhorse. |
+| `ps2_run(artifact?, seconds?)` | Probe → netdump → push+capture in one sequential flow; `log` = netconsole stream, `ps2link_alive` = console state afterwards. When the program dies from an exception, the response also carries a structured `crash` object (type, cause, badvaddr, epc, ra, sp — plus `symbols` with file:line when the ELF has debug info). The workhorse. |
+| `ps2_symbolize(artifact?, addrs)` | addr2line wrapper: maps 0x-hex addresses (EPC/ra from a crash, or any map address) to `function` + `file:line`. Default artifact: newest `.elf`; needs the build to carry `-gdwarf-2`. |
 | `ps2_reset()` | `ps2client reset` — console reboots back into a fresh ps2link (≈5–40 s; ok=true only when ps2link answers again). Call between parked runs. |
 
 ## REST API (mirror of the tools)
@@ -165,6 +197,7 @@ All numbers below were measured on a real console through this bridge
 | `POST /log?seconds=...` | |
 | `POST /run?artifact=...&seconds=...` | |
 | `POST /reset` | |
+| `POST /symbolize?artifact=...&addr=0x...&addr=...` | `addr` is repeatable; artifact defaults to the newest `.elf`. |
 
 ## Reading the results
 
@@ -175,6 +208,9 @@ All numbers below were measured on a real console through this bridge
   console is off, or the last program exited and reset the console to its
   browser (ps2link gone). Ask the user to reload ps2link on the console.
   `ps2_reset` cannot help in this state — it needs a live ps2link.
+- `ps2_run` ok=true + `crash` object → the program died from an exception;
+  the note carries the symbolized crash site. ps2_reset before the next run —
+  the exec slot stays occupied after a crash (measured).
 - `ps2_run` ok=true, `ps2link_alive=true` → the program is parked/resident;
   call `ps2_reset` before the next run (do NOT ps2_run on top of a parked
   program — ps2link silently refuses the second exec and returns an empty
@@ -211,6 +247,11 @@ All numbers below were measured on a real console through this bridge
   lock). Never run a second ps2client by hand while a bridge console op is
   in flight — the protocol has a single netconsole port and the second
   client crashes.
+- If you run `ps2client` by hand anyway (docker exec), ALWAYS pass
+  `-t <seconds>` — commands hang forever against an unreachable or occupied
+  console (measured: `dumpreg` never returned) and leave zombie processes
+  behind. Kill zombies by PID, never with `pkill -f` (the pattern matches
+  your own wrapper shell and kills it — also measured).
 - **Never let a test program return from main()** — that resets the console
   to its browser and kills ps2link (someone has to reload it by hand). End
   programs with the park pattern and use `ps2_reset` between runs.

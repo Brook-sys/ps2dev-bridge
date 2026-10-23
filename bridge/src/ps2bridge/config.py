@@ -22,6 +22,9 @@ class Config:
     reset_up_wait: int
     sync_max_bytes: int
     max_log_chars: int
+    # Triplet-named addr2line from the official ps2dev image; overridable for
+    # other toolchain layouts.
+    addr2line_bin: str = "mips64r5900el-ps2-elf-addr2line"
 
     @classmethod
     def from_env(cls, env: dict | None = None) -> "Config":
@@ -48,4 +51,5 @@ class Config:
             reset_up_wait=int(env.get("PS2BRIDGE_RESET_UP_WAIT", "30")),
             sync_max_bytes=int(env.get("PS2BRIDGE_SYNC_MAX", str(512 * 1024 * 1024))),
             max_log_chars=int(env.get("PS2BRIDGE_MAX_LOG", "40000")),
+            addr2line_bin=env.get("PS2BRIDGE_ADDR2LINE", "mips64r5900el-ps2-elf-addr2line"),
         )
