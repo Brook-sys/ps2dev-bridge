@@ -55,6 +55,14 @@ Sync only what changed; the volume persists between builds (incremental
 - While the console pulls (and after it runs the program), the netconsole
   stream — program stdout, ps2link messages, exception dumps — is printed
   by the same ps2client process. `ps2_run`'s `log` is that stream.
+- **Netconsole transport (important):** the console sends that stream as a
+  **UDP broadcast to 255.255.255.255:18194** — udptty (ps2sdk
+  `iop/network/udptty`) implements the `tty:` device all stdout goes to and
+  broadcasts every write. The bridge container only receives broadcasts
+  because its deployment **publishes `18194/udp`** (docker-proxy relays
+  them in). `ps2_run` ok=true with an **empty log** on a deployment without
+  that publish is the classic symptom — the program ran fine, the output
+  just never reached the container.
 - **Program lifecycle:** the executed ELF runs as a *thread* of ps2link,
   which stays resident underneath. But a ps2sdk program must never return
   from `main()`: crt0 turns that into the kernel's `Exit()`
@@ -140,11 +148,14 @@ them with the park.
   ok=false with "did not go down" → the reset didn't take (retry once, then
   look at the TV); "did not answer again" → the reboot started but ps2link
   didn't return in time (wait a few seconds, probe again, check the TV).
-- `ps2_run` ok=true but `log` is empty → either the program printed nothing
-  in the window, or it never ran (the TV screen says which — `executing file`
-  + program output means it ran). Retry with more seconds if the program may
-  print later; if the TV shows `could not execute`, the ELF itself was
-  rejected by the loader — inspect it (`GET /artifacts/{path}` + readelf).
+- `ps2_run` ok=true but `log` is empty → three known causes, in order of
+  likelihood: (1) **the deployment doesn't publish `18194/udp`** — the
+  netconsole is a UDP broadcast from the console and never reaches the
+  container (check the compose file; every run comes back empty, the TV
+  still shows the program output); (2) the program printed nothing in the
+  window (retry with more seconds); (3) it never ran — the TV says which:
+  `executing file` + output means it ran; `could not execute` means the
+  loader rejected the ELF (inspect it via `GET /artifacts/{path}`).
 - exit_code 124 (timeout) → the pull window ran out; the shipped ps2client
   predates the upstream TCP_NODELAY fix, so big ELFs can pull slowly. Retry
   with a larger `seconds`.

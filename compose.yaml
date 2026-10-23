@@ -24,6 +24,16 @@ services:
       # (tailscale) interface:
       #   - "100.x.y.z:17800:17800"
       - "17800:17800"
+      # ps2link's netconsole: udptty (ps2sdk iop/network/udptty) broadcasts
+      # ALL console output — program stdout included — to 255.255.255.255:18194.
+      # Publishing the UDP port is how those broadcasts reach this container:
+      # docker-proxy listens on the host and relays them in. Without this,
+      # ps2_run/ps2_log succeed but the log comes back EMPTY. It must be
+      # published unscoped (no host-IP prefix) — a host-IP-scoped publish
+      # never matches broadcast packets. Note this makes the UDP port
+      # reachable from the LAN: the worst case is text injected into the
+      # captured log.
+      - "18194:18194/udp"
     volumes:
       # Project sources + build artifacts survive container recreation.
       ps2dev-work:/work

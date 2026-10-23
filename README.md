@@ -113,6 +113,16 @@ An OpenCode-ready skill lives in [`skill/ps2dev-bridge/`](skill/ps2dev-bridge/SK
   fails fast with an honest error.
 - `ps2_push`/`ps2_run` send `netdump` (best effort) so ps2link echoes
   stdout/exceptions to the network console.
+- **Netconsole transport (why `18194/udp` must be published):** the console
+  sends its whole console stream as a **UDP broadcast to
+  255.255.255.255:18194**. udptty (ps2sdk `iop/network/udptty`) implements
+  the `tty:` device that all program stdout goes to, and every write is
+  broadcast. The bridge container therefore publishes `18194/udp` —
+  docker-proxy on the host receives the broadcasts and relays them into the
+  container, where ps2client's console socket picks them up. Without that
+  publish, `ps2_run`/`ps2_log` succeed but every log comes back **empty**;
+  the publish must be unscoped (a host-IP-scoped publish never matches
+  broadcast packets).
 - **Program lifecycle (verified against the ps2sdk/ps2link sources):** the
   executed ELF runs as a *thread* of ps2link, which stays resident underneath.
   When the program **exits** (returns from `main`), ps2sdk's crt0 calls the
@@ -137,6 +147,12 @@ An OpenCode-ready skill lives in [`skill/ps2dev-bridge/`](skill/ps2dev-bridge/SK
   (`PS2BRIDGE_SYNC_MAX`, default 512 MB).
 - All console/toolchain calls have hard timeouts — a hung PS2 can never hang
   the bridge.
+- **UDP 18194 is published on all interfaces** (required — the PS2 netconsole
+  is a link-layer broadcast, see the console-requirements section). Anything
+  on the LAN can send UDP packets to that port; the worst case is fake text
+  injected into a captured log. The TCP API port (17800) is the one that
+  matters: bind it to a trusted interface (see the commented example in
+  `compose.yaml`) and keep the key secret.
 - **The container runs as root** (the ps2dev toolchain expects it). Treat the
   API key as root-equivalent for anything inside the workspace: bind the
   published port to a trusted interface (see the commented example in
@@ -147,10 +163,11 @@ An OpenCode-ready skill lives in [`skill/ps2dev-bridge/`](skill/ps2dev-bridge/SK
 ## Limitations (honest ones)
 
 - Protocol behavior (ps2link ports 18193/18194, `host:` pull, single
-  netconsole, idle-window timeouts, program-exits-→-console-reset lifecycle)
-  was verified against the ps2client/ps2link/ps2sdk sources and a real console
-  in Oct/2026. The park + reset loop (`ps2_run` → `ps2_reset`) gets its first
-  full end-to-end pass on the next console session — expect minor tuning.
+  netconsole, idle-window timeouts, program-exits-→-console-reset lifecycle,
+  and the udptty **broadcast** transport) was verified against the
+  ps2client/ps2link/ps2sdk sources and a real console in Oct/2026 —
+  including the empty-log failure mode when `18194/udp` is not published
+  (broadcasts stop at the host; docker bridge containers never see them).
 - The ps2client binary shipped in the base image predates the upstream
   `TCP_NODELAY` fix, so the console's file pull can be slow; and ps2client
   itself SIGSEGVs on refused connections / concurrent instances. The bridge
