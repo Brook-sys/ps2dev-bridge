@@ -29,6 +29,8 @@ def cfg(tmp_path):
         build_timeout=60,
         push_timeout=10,
         log_seconds=1,
+        reset_down_wait=10,
+        reset_up_wait=30,
         sync_max_bytes=1024 * 1024,
         max_log_chars=40000,
     )
@@ -121,6 +123,78 @@ def test_console_ops_fail_cleanly_without_ps2_host(client):
     assert r.json()["error"] == "PS2_HOST is not configured on the bridge"
     r = client.post("/run", headers=H)
     assert r.json()["error"] == "PS2_HOST is not configured on the bridge"
+    r = client.post("/reset", headers=H)
+    assert r.json()["error"] == "PS2_HOST is not configured on the bridge"
+
+
+def test_reset_fails_cleanly_when_ps2link_unreachable(client, cfg):
+    # Point at this test machine: port 18193 is closed, so the probe is
+    # refused instantly and the honest error comes back without ps2client.
+    cfg.ps2_host = "127.0.0.1"
+    r = client.post("/reset", headers=H)
+    body = r.json()
+    assert body["ok"] is False
+    assert "cannot reach ps2link" in body["error"]
+
+
+def test_reset_happy_path_witnesses_down_and_back(client, cfg, monkeypatch):
+    from ps2bridge import core
+
+    cfg.ps2_host = "192.168.15.20"
+    seq = [True, True, False, False, True, True]  # pre, down-polls, up-polls
+    state = {"i": 0}
+
+    def fake_probe(c):
+        i = min(state["i"], len(seq) - 1)
+        state["i"] += 1
+        return seq[i], ""
+
+    monkeypatch.setattr(core, "_probe_ps2link", fake_probe)
+    monkeypatch.setattr(core, "_ps2client", lambda c, args, timeout: (0, "sent"))
+    monkeypatch.setattr(core.time, "sleep", lambda s: None)
+    r = client.post("/reset", headers=H)
+    body = r.json()
+    assert body["ok"] is True
+    assert body["ps2link_alive"] is True
+    assert body["exit_code"] == 0
+    assert "ready for the next ps2_run" in body["note"]
+
+
+def test_reset_reports_when_console_never_went_down(client, cfg, monkeypatch):
+    from ps2bridge import core
+
+    cfg.ps2_host = "192.168.15.20"
+    cfg.reset_down_wait = 0  # do not burn the budget polling an alive console
+    monkeypatch.setattr(core, "_probe_ps2link", lambda c: (True, ""))
+    monkeypatch.setattr(core, "_ps2client", lambda c, args, timeout: (0, ""))
+    monkeypatch.setattr(core.time, "sleep", lambda s: None)
+    r = client.post("/reset", headers=H)
+    body = r.json()
+    assert body["ok"] is False
+    assert body["ps2link_alive"] is True
+    assert "did not go down" in body["note"]
+
+
+def test_reset_reports_when_ps2link_never_came_back(client, cfg, monkeypatch):
+    from ps2bridge import core
+
+    cfg.ps2_host = "192.168.15.20"
+    cfg.reset_up_wait = 0
+    # pre-probe alive, then everything after is dead.
+    state = {"i": 0}
+
+    def fake_probe(c):
+        state["i"] += 1
+        return (state["i"] == 1, "")
+
+    monkeypatch.setattr(core, "_probe_ps2link", fake_probe)
+    monkeypatch.setattr(core, "_ps2client", lambda c, args, timeout: (0, ""))
+    monkeypatch.setattr(core.time, "sleep", lambda s: None)
+    r = client.post("/reset", headers=H)
+    body = r.json()
+    assert body["ok"] is False
+    assert body["ps2link_alive"] is False
+    assert "did not answer" in body["note"]
 
 
 def test_mcp_endpoint_initialize(client):

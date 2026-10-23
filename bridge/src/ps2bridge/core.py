@@ -6,16 +6,24 @@ Design notes (honest ones):
   and the bridge must never block forever on it.
 - Builds and console operations are serialized by a lock: the toolchain is
   CPU-bound and there is exactly one console.
-- ps2link protocol (verified against the ps2client sources, 2026-10):
+- ps2link protocol (verified against the ps2client/ps2link/ps2sdk sources, 2026-10):
   `execee` is a fire-and-forget UDP command. The console PULLS the ELF from
   this host through the TCP request channel — hence the `host:` path prefix
   (without it the console looks for a file on ITS side and fails with
-  "could not execute"). While the console pulls, the program's stdout and
-  ps2link's messages stream back to the SAME ps2client process on its UDP
-  console socket during the idle-timeout window (-t; activity extends it).
-  The protocol has a single netconsole UDP port, so two ps2clients at once
-  are illegal (the second crashes the client) — all console steps are
-  strictly sequential: probe → netdump → execee/listen.
+  "could not execute"). The loaded program runs as a THREAD of ps2link
+  (ee/cmdHandler.c: pkoExecEE → SifLoadElf + CreateThread/StartThread), so
+  ps2link stays resident underneath while it runs. What kills the console is
+  the program EXITING: ps2sdk's crt0 turns `main` returning into the kernel's
+  Exit() (ee/startup/src/crt0.c), which resets the console to its browser.
+  `reset` (PKO_RESET → pkoReset) is the way back: ps2link terminates the
+  user thread, resets the IOP and re-executes itself from RAM (IRXs embedded
+  in its ELF, network config cached in .data) — the primitive behind
+  reset_console() and the park + reset debug loop. While the console pulls,
+  the program's stdout and ps2link's messages stream back to the SAME
+  ps2client process on its UDP console socket during the idle-timeout window
+  (-t; activity extends it). The protocol has a single netconsole UDP port,
+  so two ps2clients at once are illegal (the second crashes the client) —
+  all console steps are strictly sequential: probe → netdump → execee/reset.
 - ps2client quirks we defend against (all observed on real hardware):
   SIGSEGV when a connection is refused, silent rc=0 give-ups, and TCP
   connects that block forever against a console with no ps2link. A short
@@ -30,6 +38,7 @@ import subprocess
 import tarfile
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 from . import VERSION
@@ -204,9 +213,27 @@ def _probe_ps2link(cfg: Config) -> tuple[bool, str]:
     except OSError as e:
         return False, (
             f"cannot reach ps2link at {cfg.ps2_host}:{cfg.ps2link_port} ({e}) — "
-            "is the console on and ps2link loaded? (ps2link is replaced by each "
-            "program it executes; reload it on the console before the next run)"
+            "is the console on and ps2link loaded? (ps2link stays alive while a "
+            "program runs, but when that program EXITS, the console resets to "
+            "its browser and ps2link dies — reload it on the console before the "
+            "next run)"
         )
+
+
+def _wait_for_ps2link(cfg: Config, want: bool, budget: int) -> bool:
+    """Poll the probe until it matches `want` or `budget` seconds pass.
+
+    Used by reset_console() to witness the console going down (old ps2link
+    dying) and coming back (ps2link re-executed from RAM). A budget <= 0
+    polls zero times and returns False.
+    """
+    deadline = time.monotonic() + budget
+    while time.monotonic() < deadline:
+        ok, _ = _probe_ps2link(cfg)
+        if ok is want:
+            return True
+        time.sleep(1)
+    return False
 
 
 def push(cfg: Config, artifact: str | None = None) -> dict:
@@ -238,8 +265,10 @@ def push(cfg: Config, artifact: str | None = None) -> dict:
         "artifact": str(artifact_path.relative_to(Path(cfg.workspace))),
         "log": truncate(out, cfg.max_log_chars),
         "note": (
-            "ps2link executes the ELF in place — the program replaces ps2link "
-            "on the console. Reload ps2link before the next push/run."
+            "the ELF runs as a thread under ps2link, which stays resident. When "
+            "the program EXITS (returns from main), the console resets to its "
+            "browser and ps2link dies — park the program (sleep-forever loop) "
+            "and use ps2_reset to close the loop."
         ),
     }
 
@@ -301,15 +330,113 @@ def run_on_console(
     with _op_lock:
         _ps2client(cfg, ["netdump"], timeout=15)
         rc, out = _ps2client(cfg, ["execee", f"host:{artifact_path}"], timeout=window)
+    # Post-run probe: which console state did the program leave behind?
+    alive, _ = _probe_ps2link(cfg)
+    if alive:
+        note = (
+            "the program is still resident on the console (it parked or is "
+            "long-running) — ps2link stayed alive underneath. Call ps2_reset "
+            "to reboot the console back into a fresh ps2link before the next "
+            "run."
+        )
+    else:
+        note = (
+            "the program exited: ps2sdk's crt0 turns main() returning into "
+            "the kernel's Exit(), which resets the console to its browser — "
+            "ps2link is gone and must be reloaded on the console (or make "
+            "the program park and use ps2_reset instead)."
+        )
     return {
         "ok": rc == 0,
         "exit_code": rc,
         "artifact": str(artifact_path.relative_to(Path(cfg.workspace))),
         "log": truncate(out, cfg.max_log_chars),
+        "ps2link_alive": alive,
+        "note": note,
+    }
+
+
+# ---------------------------------------------------------------- reset
+
+
+def reset_console(cfg: Config) -> dict:
+    """Reboot the console back into a fresh ps2link (`ps2client reset`).
+
+    ps2link's PKO_RESET handler (pkoReset, ee/cmdHandler.c) terminates the
+    user program's thread, resets the IOP and re-executes ps2link from RAM
+    (ExecPS2 with its own startup; IRXs embedded in the ELF, network config
+    cached in .data) — so the console re-enters ps2link with nobody touching
+    the TV. `reset` is a fire-and-forget UDP command and the stock ps2client
+    returns immediately after sending it (its main() forces timeout=0 for
+    reset), so this function confirms the outcome itself: it first witnesses
+    the probe go down (the old ps2link dying), then waits for it to answer
+    again (ps2link back and listening).
+
+    This closes the debug loop: end test programs with a park (sleep-forever
+    loop) instead of returning — crt0 turns `main` returning into the
+    kernel's Exit(), which resets the console to its browser — then the
+    cycle is ps2_run → ps2_reset → ps2_run, fully unattended.
+    """
+    if not cfg.ps2_host:
+        return {"ok": False, "error": "PS2_HOST is not configured on the bridge"}
+    probe_ok, probe_err = _probe_ps2link(cfg)
+    if not probe_ok:
+        return {"ok": False, "error": probe_err}
+    with _op_lock:
+        # -t is irrelevant here (ps2client forces 0 for reset); 10s is only
+        # the hard cap in case the client misbehaves against a dying console.
+        rc, out = _ps2client(cfg, ["reset"], timeout=10)
+    log = truncate(out, cfg.max_log_chars)
+    if rc != 0:
+        return {
+            "ok": False,
+            "exit_code": rc,
+            "log": log,
+            "error": (
+                f"ps2client reset failed (exit {rc}) — the reset command may "
+                "not have been delivered; console state is unknown, probe it "
+                "with ps2_status"
+            ),
+        }
+    went_down = _wait_for_ps2link(cfg, want=False, budget=cfg.reset_down_wait)
+    if not went_down:
+        alive, _ = _probe_ps2link(cfg)
+        return {
+            "ok": False,
+            "exit_code": rc,
+            "log": log,
+            "ps2link_alive": alive,
+            "note": (
+                "the reset command was sent but ps2link did not go down "
+                f"within {cfg.reset_down_wait}s — it may not have taken effect "
+                "(lost UDP packet, or a ps2link build without the reset "
+                "handler). If a program is parked on the console it is still "
+                "resident: retry ps2_reset or check the console screen."
+            ),
+        }
+    came_back = _wait_for_ps2link(cfg, want=True, budget=cfg.reset_up_wait)
+    if came_back:
+        return {
+            "ok": True,
+            "exit_code": rc,
+            "log": log,
+            "ps2link_alive": True,
+            "note": (
+                "ps2link rebooted and is listening again — the console is "
+                "ready for the next ps2_run."
+            ),
+        }
+    alive, _ = _probe_ps2link(cfg)
+    return {
+        "ok": False,
+        "exit_code": rc,
+        "log": log,
+        "ps2link_alive": alive,
         "note": (
-            "log holds the netconsole stream for the window. ps2link is "
-            "replaced by the executed program — reload it on the console "
-            "before the next run."
+            "the reset took the console down but ps2link did not answer "
+            f"again within {cfg.reset_up_wait}s — it may still be rebooting "
+            "(wait a few seconds and probe again) or the re-exec failed; "
+            "check the console screen."
         ),
     }
 

@@ -5,7 +5,7 @@ Layout of the service:
     ┌────────────────────────────────────────────────┐
     │ Starlette (one port)                           │
     │  ├── REST routes: /health /sync /build         │
-    │  │   /artifacts /push /log /run                 │
+    │  │   /artifacts /push /log /run /reset         │
     │  └── Mount("/") → FastMCP http_app  → POST /mcp│
     │  middleware: X-API-Key on everything but /health│
     └────────────────────────────────────────────────┘
@@ -131,9 +131,28 @@ def create_app(cfg: Config) -> Starlette:
         netconsole stream. `log` holds that stream (program output, ps2link
         messages, exception dumps). seconds is the idle capture window
         (default 15); the response takes ≈ pull + runtime + seconds. The
-        executed program replaces ps2link — reload it before the next run.
+        program runs as a ps2link thread: if it parks (ends with a
+        sleep-forever loop) ps2link stays alive and `ps2link_alive` in the
+        response is true — then call ps2_reset to reboot the console back
+        into a fresh ps2link. If the program exits, the console resets to
+        its browser and ps2link must be reloaded by hand.
         """
         return core.run_on_console(cfg, artifact, seconds)
+
+    @mcp.tool
+    def ps2_reset() -> dict:
+        """Reboot the PS2 console back into a fresh ps2link (`ps2client reset`).
+
+        ps2link terminates the running program, resets the IOP and re-executes
+        itself from RAM — no human needed at the console. The bridge watches
+        the probe go down and come back, and only reports ok=true when ps2link
+        is listening again (the whole call takes ≈ 5–40 s). Call it after a
+        ps2_run whose program parks, to close the loop run → reset → run, or
+        to recover a wedged console. It only works while ps2link is alive:
+        if the last program exited, the console is on its browser and this
+        fails with an honest error — ps2link must be reloaded on the console.
+        """
+        return core.reset_console(cfg)
 
     # ------------------------------------------------------------ REST routes
 
@@ -186,6 +205,9 @@ def create_app(cfg: Config) -> Starlette:
         seconds = int(raw) if raw and raw.isdigit() else None
         return JSONResponse(core.run_on_console(cfg, artifact, seconds))
 
+    def reset_ep(request: Request):
+        return JSONResponse(core.reset_console(cfg))
+
     # ------------------------------------------------------------ assembly
 
     mcp_app = mcp.http_app(path="/mcp")
@@ -199,6 +221,7 @@ def create_app(cfg: Config) -> Starlette:
         Route("/push", push_ep, methods=["POST"]),
         Route("/log", log_ep, methods=["POST"]),
         Route("/run", run_ep, methods=["POST"]),
+        Route("/reset", reset_ep, methods=["POST"]),
         # Catch-all: everything else belongs to the MCP streamable-HTTP app
         # (endpoint: POST /mcp). Must come last.
         Mount("/", app=mcp_app),

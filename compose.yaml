@@ -16,6 +16,8 @@ services:
       # PS2BRIDGE_BUILD_TIMEOUT: 900
       # PS2BRIDGE_PUSH_TIMEOUT: 60
       # PS2BRIDGE_LOG_SECONDS: 15
+      # PS2BRIDGE_RESET_DOWN_WAIT: 10
+      # PS2BRIDGE_RESET_UP_WAIT: 30
     ports:
       # Default: publish on all interfaces. Harden by binding to a single
       # address reachable only from your trusted network, e.g. a VPN

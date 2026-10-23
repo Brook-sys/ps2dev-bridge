@@ -9,8 +9,13 @@ that AI agents (or humans with `curl`) can build, push and observe homebrew on a
 **real console** without ever opening a shell on the container host.
 
 ```
-edit code → ps2_build → ps2_run (push via ps2link + capture console log) → read log → repeat
+edit code → ps2_build → ps2_run (push via ps2link + capture console log)
+          → read log → ps2_reset (console reboots back into ps2link) → repeat
 ```
+
+With programs that **park** at the end (sleep-forever loop instead of
+returning from `main`), this loop runs unattended: no one has to touch the
+console between runs.
 
 ## How it works
 
@@ -18,7 +23,7 @@ edit code → ps2_build → ps2_run (push via ps2link + capture console log) →
 ┌ your machine ────────┐                    ┌ container host (same LAN as the PS2) ─┐
 │ AI agent / curl      │                    │ ghcr.io/brook-sys/ps2dev-bridge        │
 │  MCP client  ───────┼── X-API-Key ──────►│  ├ REST: /health /sync /build          │
-│  skill (UX layer)   │                    │  │   /artifacts /push /log /run         │
+│  skill (UX layer)   │                    │  │   /artifacts /push /log /run /reset │
 └──────────────────────┘                    │  ├ MCP:   POST /mcp (streamable HTTP) │
                                             │  └ ps2dev toolchain + ps2client        │
                                             │       workspace volume: /work          │
@@ -45,7 +50,8 @@ MCP (registered server or direct streamable HTTP at `/mcp`):
 | `ps2_build(clean?)` | `make` in the workspace, full log in the response |
 | `ps2_push(artifact?)` | `ps2client execee host:<path>` — the console pulls the ELF from the bridge and runs it |
 | `ps2_log(seconds?)` | `ps2client listen` — capture the PS2 network console |
-| `ps2_run(artifact?, seconds?)` | Probe → netdump → push + netconsole capture in one sequential flow |
+| `ps2_run(artifact?, seconds?)` | Probe → netdump → push + netconsole capture in one sequential flow; response includes `ps2link_alive` |
+| `ps2_reset()` | `ps2client reset` — reboot the console back into a fresh ps2link (watches it go down and come back) |
 
 REST mirror (same operations, for scripts/CI):
 
@@ -58,6 +64,7 @@ GET  /artifacts/{path}          # download any workspace file
 POST /push?artifact=...
 POST /log?seconds=...
 POST /run?artifact=...&seconds=...
+POST /reset
 ```
 
 Everything except `/health` requires `X-API-Key`.
@@ -106,10 +113,18 @@ An OpenCode-ready skill lives in [`skill/ps2dev-bridge/`](skill/ps2dev-bridge/SK
   fails fast with an honest error.
 - `ps2_push`/`ps2_run` send `netdump` (best effort) so ps2link echoes
   stdout/exceptions to the network console.
-- **ps2link is replaced by every program it executes** — reload ps2link on
-  the console between runs. One console op at a time; the netconsole is a
-  single UDP port, so concurrent ps2client invocations are illegal (the
-  bridge serializes its own, and nothing else should run one meanwhile).
+- **Program lifecycle (verified against the ps2sdk/ps2link sources):** the
+  executed ELF runs as a *thread* of ps2link, which stays resident underneath.
+  When the program **exits** (returns from `main`), ps2sdk's crt0 calls the
+  kernel's `Exit()`, which resets the console to its browser and ps2link dies.
+  To keep the loop unattended, end test programs with a **park** (sleep-forever
+  loop, e.g. `SleepThread();`) and call `ps2_reset` after each run: ps2link's
+  reset handler terminates the program, resets the IOP and re-executes itself
+  from RAM, so the console is back at a fresh ps2link without anyone touching
+  it. Programs that exit instead need a manual ps2link reload on the console.
+- One console op at a time; the netconsole is a single UDP port, so concurrent
+  ps2client invocations are illegal (the bridge serializes its own, and
+  nothing else should run one meanwhile).
 
 ## Security model (read this before exposing the port)
 
@@ -132,10 +147,10 @@ An OpenCode-ready skill lives in [`skill/ps2dev-bridge/`](skill/ps2dev-bridge/SK
 ## Limitations (honest ones)
 
 - Protocol behavior (ps2link ports 18193/18194, `host:` pull, single
-  netconsole, idle-window timeouts, ps2link dying after each exec) was
-  verified against the ps2client sources and a real console in Oct/2026.
-  The 0.1.2 sequential flow gets its first full end-to-end pass on the next
-  console session — expect minor tuning.
+  netconsole, idle-window timeouts, program-exits-→-console-reset lifecycle)
+  was verified against the ps2client/ps2link/ps2sdk sources and a real console
+  in Oct/2026. The park + reset loop (`ps2_run` → `ps2_reset`) gets its first
+  full end-to-end pass on the next console session — expect minor tuning.
 - The ps2client binary shipped in the base image predates the upstream
   `TCP_NODELAY` fix, so the console's file pull can be slow; and ps2client
   itself SIGSEGVs on refused connections / concurrent instances. The bridge

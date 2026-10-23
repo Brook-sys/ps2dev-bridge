@@ -18,6 +18,8 @@ class Config:
     build_timeout: int
     push_timeout: int
     log_seconds: int
+    reset_down_wait: int
+    reset_up_wait: int
     sync_max_bytes: int
     max_log_chars: int
 
@@ -39,6 +41,11 @@ class Config:
             build_timeout=int(env.get("PS2BRIDGE_BUILD_TIMEOUT", "900")),
             push_timeout=int(env.get("PS2BRIDGE_PUSH_TIMEOUT", "60")),
             log_seconds=int(env.get("PS2BRIDGE_LOG_SECONDS", "15")),
+            # reset_console(): how long to watch for ps2link to go down after
+            # the reset command (witnessing the reboot start) and how long to
+            # wait for it to answer again (ps2link re-initializing).
+            reset_down_wait=int(env.get("PS2BRIDGE_RESET_DOWN_WAIT", "10")),
+            reset_up_wait=int(env.get("PS2BRIDGE_RESET_UP_WAIT", "30")),
             sync_max_bytes=int(env.get("PS2BRIDGE_SYNC_MAX", str(512 * 1024 * 1024))),
             max_log_chars=int(env.get("PS2BRIDGE_MAX_LOG", "40000")),
         )
