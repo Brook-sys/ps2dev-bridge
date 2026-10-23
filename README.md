@@ -132,6 +132,26 @@ An OpenCode-ready skill lives in [`skill/ps2dev-bridge/`](skill/ps2dev-bridge/SK
   reset handler terminates the program, resets the IOP and re-executes itself
   from RAM, so the console is back at a fresh ps2link without anyone touching
   it. Programs that exit instead need a manual ps2link reload on the console.
+- **One program at a time (verified on hardware):** while a program is
+  resident, ps2link **silently refuses** a second exec — `pkoExecEE`
+  returns before pulling anything, and `ps2_run` comes back `ok: true`
+  with an empty log. No corruption; `ps2_reset` between runs is the rule.
+- **Heavy programs (measured):** the program owns the whole 31 MB GAME
+  region (0x00100000–0x02000000) — ps2link lives below 0x00100000 and is
+  never in the way (a 24 MB heap stress passed). The stack comes from the
+  program's own linkfile via crt0's `SetupThread`: stock = 128 KB at the
+  top of GAME memory (measured `sp = 0x01FFED30` at `main`). The EE has
+  no MMU, so stack overflow is **silent corruption**, not a crash —
+  deep-stack programs should ship a custom linkfile (e.g. `_stack =
+  0x01E00000`, `_stack_size = 1 MB`, heap capped at `0x01D00000`;
+  measured `sp = 0x01EFFD30`, heap and stack can never meet).
+- **IOP resets blind the bridge (measured):** the netconsole, the ELF pull
+  channel and the command/reset socket all live **on the IOP**. A program
+  that calls `SifIopReset` — which is what real games do at boot — kills
+  all of them at once while it keeps running on screen: the log ends at
+  the reset point, `ps2link_alive` comes back `false`, and recovery is a
+  manual ps2link reload. Run such programs only when a hand reload
+  afterwards is acceptable.
 - One console op at a time; the netconsole is a single UDP port, so concurrent
   ps2client invocations are illegal (the bridge serializes its own, and
   nothing else should run one meanwhile).

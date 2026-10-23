@@ -67,9 +67,14 @@ Sync only what changed; the volume persists between builds (incremental
   which stays resident underneath. But a ps2sdk program must never return
   from `main()`: crt0 turns that into the kernel's `Exit()`
   (ps2sdk `ee/startup/src/crt0.c`), which resets the console to its **native
-  browser screen** and kills ps2link. Two consequences:
+  browser screen** and kills ps2link. Three consequences:
   - if a program exits, ps2link is gone and the user must reload it on the
     console by hand (the bridge's probe will keep failing honestly);
+  - **one program at a time:** while a program is resident, a second exec
+    is **silently refused** by ps2link — `pkoExecEE` checks its user thread
+    and returns -1 before pulling anything (verified on hardware). The
+    refusal looks like `ok: true` + empty log: no crash, no corruption,
+    nothing runs. `ps2_reset` between runs is the rule;
   - `reset` (ps2link command, PKO_RESET) reboots the console back into a
     **fresh ps2link from RAM** — it terminates the user thread, resets the
     IOP and re-executes itself (IRXs embedded in its ELF, network config
@@ -101,9 +106,40 @@ ps2_run   → ps2_reset   → ps2_run   → ...   (ps2link_alive=true between ru
 
 `ps2_run` reports `ps2link_alive` after the capture window: `true` means
 the program parked (or is long-running) — call `ps2_reset` and move on;
-`false` means it exited and reset the console to the browser — ask the user
-to reload ps2link. If you write or edit test programs yourself, always end
-them with the park.
+`false` means it exited and reset the console to the browser (or reset the
+IOP — see below) — ask the user to reload ps2link. If you write or edit
+test programs yourself, always end them with the park.
+
+## Heavy programs: memory and the IOP (measured on hardware)
+
+All numbers below were measured on a real console through this bridge
+(stack pointer probed at `main`, 24 MB heap stress, an actual IOP reset):
+
+- **RAM:** the program owns the whole GAME region
+  (0x00100000–0x02000000, 31 MB). ps2link lives **below** it, in BIOS
+  unused memory (0x00094000–0x00100000), and is never in the program's
+  way. `malloc(24 MB)` + full-page write/verify passed; the heap starts
+  right after `_end` (~0x0012B40C for a hello-sized program).
+- **Stack:** the 16 KB buffer inside ps2link is only the *bootstrap*
+  stack — the program's own crt0 hands the thread the stack declared in
+  **its linkfile** (`SetupThread`, syscall 60). Stock ps2sdk linkfile
+  (`_stack = -1`, `_stack_size = 128 * 1024`) → measured `sp@main =
+  0x01FFED30`: a real 128 KB stack just under the top of GAME memory.
+  **The EE has no MMU and no guard pages:** exceeding the stack region
+  never faults — it silently writes into whatever is below it (usually
+  your own heap). Deep-recursion / big-local programs should ship a
+  custom linkfile with an explicit stack region and a capped heap, e.g.
+  `PROVIDE(_heap_size = 0x01D00000 - _end); PROVIDE(_stack = 0x01E00000);
+  PROVIDE(_stack_size = 1024 * 1024);` — measured `sp@main = 0x01EFFD30`
+  (region [0x01E00000, 0x01F00000]); heap and stack can never meet.
+- **IOP reset = the bridge goes blind.** Everything the bridge talks to —
+  netconsole (udptty), the ELF pull channel, the command/reset socket —
+  lives **on the IOP**. A program calling `SifIopReset` (what real games
+  do at boot) kills all of them at once while the program keeps running
+  on screen. Measured signature: `ps2_run` ok=true, log **ends at the
+  reset point**, `ps2link_alive: false`, then `/log` and `/reset` fail
+  with `cannot reach ps2link`. Recovery is a **manual ps2link reload** —
+  run such programs only when a hand reload afterwards is acceptable.
 
 ## MCP tools
 
@@ -141,21 +177,27 @@ them with the park.
   `ps2_reset` cannot help in this state — it needs a live ps2link.
 - `ps2_run` ok=true, `ps2link_alive=true` → the program is parked/resident;
   call `ps2_reset` before the next run (do NOT ps2_run on top of a parked
-  program — the new ELF would overwrite the running one's memory).
+  program — ps2link silently refuses the second exec and returns an empty
+  log, which is easy to misread as "my program printed nothing").
 - `ps2_run` ok=true, `ps2link_alive=false` → the program exited and the
-  console is on its browser; the user must reload ps2link.
+  console is on its browser — or it reset the IOP and killed ps2link's
+  network (the log ending mid-program is the tell; see "Heavy programs").
+  Either way the user must reload ps2link.
 - `ps2_reset` ok=true → ps2link is back; proceed with the next ps2_run.
   ok=false with "did not go down" → the reset didn't take (retry once, then
   look at the TV); "did not answer again" → the reboot started but ps2link
   didn't return in time (wait a few seconds, probe again, check the TV).
-- `ps2_run` ok=true but `log` is empty → three known causes, in order of
-  likelihood: (1) **the deployment doesn't publish `18194/udp`** — the
-  netconsole is a UDP broadcast from the console and never reaches the
-  container (check the compose file; every run comes back empty, the TV
-  still shows the program output); (2) the program printed nothing in the
-  window (retry with more seconds); (3) it never ran — the TV says which:
-  `executing file` + output means it ran; `could not execute` means the
-  loader rejected the ELF (inspect it via `GET /artifacts/{path}`).
+- `ps2_run` ok=true but `log` is empty → four known causes, in order of
+  likelihood: (1) **a program is still resident and ps2link silently
+  refused the exec** (you forgot `ps2_reset` — the TV still shows the
+  previous program; no loadelf lines is the giveaway); (2) **the
+  deployment doesn't publish `18194/udp`** — the netconsole is a UDP
+  broadcast from the console and never reaches the container (check the
+  compose file; every run comes back empty, the TV still shows the
+  program output); (3) the program printed nothing in the window (retry
+  with more seconds); (4) it never ran — the TV says which: `executing
+  file` + output means it ran; `could not execute` means the loader
+  rejected the ELF (inspect it via `GET /artifacts/{path}`).
 - exit_code 124 (timeout) → the pull window ran out; the shipped ps2client
   predates the upstream TCP_NODELAY fix, so big ELFs can pull slowly. Retry
   with a larger `seconds`.
@@ -172,9 +214,12 @@ them with the park.
 - **Never let a test program return from main()** — that resets the console
   to its browser and kills ps2link (someone has to reload it by hand). End
   programs with the park pattern and use `ps2_reset` between runs.
-- A program executed by ps2link runs on ps2link's own 16 KB thread stack —
-  keep stack usage small (no big local arrays; deep recursion can smash
-  ps2link's memory under it).
+- Stack: with the stock ps2sdk linkfile the program gets a real 128 KB
+  stack at the top of GAME memory (measured; ps2link's 16 KB buffer is only
+  the pre-`main` bootstrap). Overflow is **silent corruption** — the EE has
+  no guard pages — so deep-recursion/big-local programs need a custom
+  linkfile with a bigger explicit stack region; see "Heavy programs" for
+  the measured recipe.
 - `ps2_push`/`ps2_run` block for the whole idle window even on success —
   that's how the pull/capture protocol works, not a hang.
 - Long builds are capped by `PS2BRIDGE_BUILD_TIMEOUT` (default 900 s).
