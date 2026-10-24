@@ -99,6 +99,17 @@ static headers):
 
 An OpenCode-ready skill lives in [`skill/ps2dev-bridge/`](skill/ps2dev-bridge/SKILL.md).
 
+Also in this repo:
+
+- [`ps2gdb/`](ps2gdb/) — a hardware-validated kit for GDB-on-console
+  debugging: the pinned patch that fixes the upstream ps2gdb EE stub
+  (upstream `b1f3428` hangs on real hardware), a reconstruction script with
+  sha256 gates, the tested session drivers and the raw wire/netconsole
+  evidence of the validated sessions.
+- [`docs/`](docs/) — the validation record, the open issues (measured but
+  deliberately unfixed: the ps2link strand, the ps2ips ≥1 KiB send failure,
+  post-ps2ips reset behavior) and the future-work plans.
+
 ## Console requirements
 
 - A PS2 on the same LAN as the bridge host, running **ps2link** (e.g. loaded

@@ -172,13 +172,18 @@ terminates the program thread. ps2link itself survives.
   `ps2_symbolize` — same addr2line the bridge uses; `??` means no debug info
   at that address.
 
-## GDB on real hardware (experimental — measured 2026-10-24)
+## GDB on real hardware (validated 2026-10-24 — not integrated in the bridge)
 
 Interactive GDB debugging on the console works via **ps2gdb** — a GDB stub
 (RSP server) that runs inside your program on the EE and listens on
-**TCP port 12**. This is **experimental and NOT integrated in the bridge**
-(the stub and samples live in a separate experimental tree); the bridge's
-role stays build → push → log → reset.
+**TCP port 12**. The five validated fixes, the samples, the tested session
+drivers and the raw evidence are consolidated in this repo as the
+[`ps2gdb/`](../../ps2gdb/) kit; the bridge's role stays build → push → log →
+reset (there is deliberately **no gdb tool in the bridge** — that code path
+was never tested). **Licensing:** upstream ps2gdb has no LICENSE file
+(custom © 2003 notice with a non-commercial-use clause), so the stub source
+is NOT vendored — the kit ships `fixes.patch` plus a reconstruction script
+pinned by sha256 gates to the exact bytes that passed on hardware.
 
 **The upstream stub (github.com/ps2dev/ps2gdb @ b1f3428) does not work on
 hardware out of the box.** It took 5 local fixes, each validated *offline
@@ -208,6 +213,19 @@ errors, live writes (`set var g_mark=42`/`g_counter=100` → readback
 resumed program verifying the writes itself on screen — then exiting cleanly
 (the console reset to its browser afterwards: expected after a clean exit,
 not a strand).
+
+**Anti-forgery proof method (owner-verified 2026-10-24):** when a doubter
+must see GDB working with their own eyes — publish the ELF's sha256 FIRST,
+let the console owner pick two different integers only after that, and run
+a demo that never writes its own magic variable (volatile, starts 0) — the
+numbers can only appear via live GDB memory writes at two breakpoint stops.
+Measured on the wire: breakpoint insert/remove at `checkpoint` via `M`
+writes, the owner's numbers as wire bytes (`M12bfd4,4:c59e0200` = 171717,
+`M12bfd4,4:32790600` = 424242), 7× `g` with zero packet errors; the program
+echoes each write to the netconsole and parks on a final `PROOF COMPLETE`
+line holding the owner's number on the TV. The owner confirmed it live.
+Driver: `ps2gdb/scripts/gdb-session-tv.sh`; full record:
+[`docs/ps2gdb-validation.md`](../../docs/ps2gdb-validation.md).
 
 RSP etiquette (measured with gdb 17.0.50):
 
@@ -287,6 +305,10 @@ Operational facts when ps2ips is loaded (the stub needs it):
   ok=false with "did not go down" → the reset didn't take (retry once, then
   look at the TV); "did not answer again" → the reboot started but ps2link
   didn't return in time (wait a few seconds, probe again, check the TV).
+  **Caveat after a GDB/ps2ips boot (measured 2026-10-24):** the reset can
+  take the console down and ps2link never comes back — re-probe after
+  ~30 s, then assume a manual power-cycle is needed (open issue:
+  [`docs/ps2gdb-open-issues.md`](../../docs/ps2gdb-open-issues.md) #4).
 - `ps2_run` ok=true but `log` is empty → four known causes, in order of
   likelihood: (1) **a program is still resident and ps2link silently
   refused the exec** (you forgot `ps2_reset` — the TV still shows the
