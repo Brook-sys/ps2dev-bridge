@@ -172,6 +172,70 @@ terminates the program thread. ps2link itself survives.
   `ps2_symbolize` — same addr2line the bridge uses; `??` means no debug info
   at that address.
 
+## GDB on real hardware (experimental — measured 2026-10-24)
+
+Interactive GDB debugging on the console works via **ps2gdb** — a GDB stub
+(RSP server) that runs inside your program on the EE and listens on
+**TCP port 12**. This is **experimental and NOT integrated in the bridge**
+(the stub and samples live in a separate experimental tree); the bridge's
+role stays build → push → log → reset.
+
+**The upstream stub (github.com/ps2dev/ps2gdb @ b1f3428) does not work on
+hardware out of the box.** It took 5 local fixes, each validated *offline
+first* with real gdb (17.0.50) against a fault-injecting fake stub before
+spending console cycles:
+
+1. `g`/`G` packets: 90 registers × 8 bytes LE (720-byte body, 1444 wire bytes);
+2. first stop reply without the spurious `-` prefix byte;
+3. `getpacket`: NAK + rescan on bad checksum (upstream: infinite error loop);
+4. `putpacket`: resend on NAK (upstream: permanent ACK-wait deadlock);
+5. **`putpacket` sends the frame in ≤512-byte chunks — the root-cause fix.**
+
+Measured root cause: **ps2ips `send()` never delivers ~1 KiB frames.** A size
+ladder on the wire: stub replies ≤517 bytes always cross, ≥1028 bytes deliver
+zero bytes and kill that connection (the hardened stub survives and
+re-accepts; upstream would wedge forever). ps2ips source: `BUFF_SIZE=1024`
+clamped copy into a 1056-byte IOP buffer at offset 64 → any single send >992
+bytes overflows it. The `g` reply is the session's first >1 KiB packet — which
+is why every register fetch hung the whole session. gdb accepts chunked
+frames transparently (verified: 1444-byte reply as 512+512+420, and
+NAK → chunked resend accepted).
+
+What a full session proved on hardware: symbolized initial stop and breakpoint
+(`bump() gdbmark.c:11`) with backtrace, `g` delivered 18× with zero packet
+errors, live writes (`set var g_mark=42`/`g_counter=100` → readback
+`0x2a`/`0x64`), single-step executing `g_counter++` (`$5 = 101`), and the
+resumed program verifying the writes itself on screen — then exiting cleanly
+(the console reset to its browser afterwards: expected after a clean exit,
+not a strand).
+
+RSP etiquette (measured with gdb 17.0.50):
+
+- **Zero probes on port 12 before the session** on a pristine boot — the gdb
+  connection must be the stub's first accepted connection.
+- ACK every stub reply when raw-probing; real gdb retransmits a packet it
+  got a NAK for, and accepts the resend when it NAKs a bad checksum.
+- `set remotelogfile <file>` in gdb records **every RSP byte in both
+  directions** — the wire log is what cracked the failure; use it before
+  theorizing about any protocol weirdness.
+- The stub answers the essential subset (`?`, `H`, `g/G`, `m/M`, `c`, `s`);
+  extended packets (`Z0`, `qOffsets`, `qSymbol`) get empty replies and gdb
+  degrades gracefully (software breakpoints fall back to direct `M` writes).
+
+Operational facts when ps2ips is loaded (the stub needs it):
+
+- **Strand pattern (6/6 boots):** any boot with ps2ips loaded kills ps2link
+  within ~20–40 min, even when the program parks. Plan each console cycle to
+  finish before that, and distinguish the two deaths: *dead after a clean
+  exit* = expected browser reset; *dead mid-session or parked* = the strand.
+- `POST /log` is a netconsole **listening window**, not a persistent buffer —
+  run it in the background around the gdb session (needs ps2link alive).
+  Program stdout via udptty still delivers after ps2ips load and a full gdb
+  session (verified: MARK2..MARK5 captured through the whole session).
+- During a session the program is stopped inside the stub's exception handler;
+  after a final `continue` the program resumes and the stub parks in
+  `accept()` — a fresh gdb connection re-enters without a reboot (measured).
+
 ## MCP tools
 
 | Tool | What it does |
