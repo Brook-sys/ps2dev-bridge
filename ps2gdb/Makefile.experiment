@@ -1,0 +1,22 @@
+# Experiment tree: upstream ps2gdb (ee/, sample/) + instrumented sample2/.
+# sample2 prints netconsole markers so the bridge can measure whether udptty
+# survives the stub's ps2ips.irx + ps2ip_init() (second TCP/IP stack on IOP).
+# sample3 is the owner-visible TV proof: gdb writes two owner-picked numbers
+# into g_magic at two breakpoint stops; the numbers appear on the TV and the
+# final PROOF COMPLETE line parks on screen (see gdbtv.c header).
+# NOTE: ps2client (the host: file server) runs with cwd=/ and strips the
+# leading slash, so "host:ps2ips.irx" resolves to /ps2ips.irx - copy both.
+all:
+	mkdir -p lib
+	$(MAKE) -C ee
+	$(MAKE) -C sample
+	$(MAKE) -C sample2
+	$(MAKE) -C sample3
+	cp -f $(PS2SDK)/iop/irx/ps2ips.irx ./ps2ips.irx
+	cp -f $(PS2SDK)/iop/irx/ps2ips.irx /ps2ips.irx
+
+clean:
+	$(MAKE) -C ee clean
+	$(MAKE) -C sample clean
+	$(MAKE) -C sample2 clean
+	$(MAKE) -C sample3 clean

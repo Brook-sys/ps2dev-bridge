@@ -1,0 +1,1 @@
+{"ok":false,"exit_code":0,"log":"","ps2link_alive":false,"note":"the reset took the console down but ps2link did not answer again within 30s — it may still be rebooting (wait a few seconds and probe again) or the re-exec failed; check the console screen."}

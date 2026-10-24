@@ -1,0 +1,44 @@
+=== cycle3-tv: gdb session (numbers: 171717 then 424242; cap 240s, -k 5) ===
+0x001058b0 in breakpoint () at ps2gdbStub.c:1326
+1326	    __asm__ __volatile__("			\n"
+Breakpoint 1 at 0x1030d4: file gdbtv.c, line 43.
+
+Breakpoint 1, checkpoint () at gdbtv.c:43
+43	}
+#0  checkpoint () at gdbtv.c:43
+#1  0x001032b0 in main (argc=1, argv=0xdc9d0) at gdbtv.c:72
+                  zero               at               v0               v1
+ R0   0000000000000000 0000000070030c13 0000000000000028 0000000000000000 
+                    a0               a1               a2               a3
+ R4   0000000000000028 00000000fff80000 0000000000ffffff 0000000000ffffff 
+                    a4               a5               a6               a7
+ R8   0000000000127580 0000000000000008 0000000020000000 0000000000000080 
+                    t0               t1               t2               t3
+ R12  0000000000000040 000000000012be60 0000000000000040 000000000012bd60 
+                    s0               s1               s2               s3
+ R16  00000000000dc9cc 00000000000dc9d0 0000000000000000 0000000000000000 
+                    s4               s5               s6               s7
+ R20  0000000000000000 0000000000000000 0000000000000000 0000000000000000 
+                    t8               t9               k0               k1
+ R24  0000000000000280 0000000000000002 0000000000000000 0000000000000000 
+                    gp               sp               s8               ra
+ R28  00000000001338f0 0000000001ffed00 0000000001ffed00 00000000001032b0 
+                    sr               lo               hi              bad
+      0000000070030c13 0000000000000000 0000000000000000 0000000002000000 
+                 cause               pc
+      0000000070008024 00000000001030d4 
+                   fsr              fir
+              00000000         00000000 
+$1 = 40
+$2 = 0
+
+Breakpoint 1, checkpoint () at gdbtv.c:43
+43	}
+$3 = 80
+$4 = 171717
+Cannot execute this command while the target is running.
+Use the "interrupt" command to stop the target
+and then try again.
+=== gdb exit: 0 (124 = cap kill while target runs free: OK by design) ===
+=== RSP WIRE LOG ===
+12358 /tmp/lab/rsp-c3.log

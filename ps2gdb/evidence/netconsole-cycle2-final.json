@@ -1,0 +1,1 @@
+{"ok":true,"exit_code":0,"log":"MARK2: stub returned - udptty SURVIVED ps2ips + ps2ip_init + gdb session\nMARK3: after scr_printf 1\nMARK4: parking now (breakpoint target: bump)\nMARK-GDB: agent wrote g_mark=42 via GDB, counter=101 - live write proven\nMARK5: exiting cleanly\n"}

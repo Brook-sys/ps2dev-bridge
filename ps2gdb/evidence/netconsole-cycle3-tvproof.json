@@ -1,0 +1,1 @@
+{"ok":false,"exit_code":124,"log":"GDBTV2: stub alive, demo loop starts\nGDBTV-WRITE: magic=171717 write=1 at counter=41\nGDBTV-WRITE: magic=424242 write=2 at counter=81\nGDBTV-DONE: magic=424242 counter=200 writes=2 - parking\n\n[ps2dev-bridge] timed out after 175s: ps2client -h 192.168.15.20 -t 170 listen"}
