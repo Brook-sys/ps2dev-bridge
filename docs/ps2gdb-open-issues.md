@@ -32,6 +32,9 @@ code without a new validation cycle.
   a silent truncation? a pbuf chain failure?) — never instrumented. Fixing
   **ps2ips itself** (e.g. larger buffers, scatter/gather) is **untested work** and
   stays out of the code until measured.
+- **How to investigate (planned, never run):** reproduce outside gdb with an
+  EE-side harness (ps2ips + a send-size ladder), and/or instrument lwIP in the
+  IOP. Low priority — the workaround is fully validated.
 
 ## 3. Black screen after a clean exit (deviation from the 2026-10-23 baseline)
 
@@ -71,6 +74,8 @@ reliable pattern; everything after the final `continue` is best-effort.
   carries a custom © 2003 Ray Donnelly notice: BSD-style conditions **plus**
   "use … for academic, research and non-commercial purposes only", and the author
   retains a non-exclusive royalty-free license to licensee modifications.
+- **Owner decision (2026-10-24):** consolidate the fixes **here** (the `ps2gdb/` kit)
+  instead of an upstream PR; the upstream path stays open for the future.
 - **Consequences (already applied):** the stub source is **not vendored** into this
   MIT-licensed repository; the fixes ship as `fixes.patch` + a reconstruction kit
   (see `ps2gdb/README.md`). An upstream PR remains possible in principle — it
